@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# asn123 一键卸载
+# curl -fsSL https://raw.githubusercontent.com/snll66/asn123/main/uninstall.sh | bash
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+info() { echo -e "${GREEN}[+]${NC} $*"; }
+warn() { echo -e "${RED}[!]${NC} $*"; }
+
+for d in "$HOME/asn123" "$HOME/cf-ip-scanner.tmp"; do
+    if [ -d "$d" ]; then
+        rm -rf "$d"
+        info "已删除 $d"
+    fi
+done
+
+WRAPPER="/usr/local/bin/asn123"
+if [ -f "$WRAPPER" ]; then
+    sudo rm -f "$WRAPPER"
+    info "已删除快捷命令 $WRAPPER"
+fi
+
+echo ""
+echo -e "${GREEN}✅ 卸载完成${NC}"

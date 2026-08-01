@@ -1,0 +1,11 @@
+cf-scanner
+__pycache__/
+cidrs.txt
+masscan_result.txt
+cf_hits.txt
+verified.txt
+output_*.csv
+*.tmp
+scanner.state
+ips.txt
+scan_temp.log
