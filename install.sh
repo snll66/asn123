@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ──────────────────────────────────────────────
+# asn123 一键安装 / 更新 / 卸载
+#   curl -fsSL <raw_url> | bash                  # 一键安装
+#   bash install.sh                              # 菜单选择
+#   bash install.sh update / uninstall           # 直接执行
+# ──────────────────────────────────────────────
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC='\033[0m'
+BOLD='\033[1m'
+
+VERSION="v2.0.0"
+
+logo() {
+    echo -e "${CYAN}${BOLD}"
+    echo "   ╔══════════════════════════════╗"
+    echo "   ║       asn123  ${VERSION}          ║"
+    echo "   ║  ASN → masscan → CF 节点    ║"
+    echo "   ║  多端口扫描 · 无测速       ║"
+    echo "   ╚══════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+info()  { echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { echo -e "${RED}[!]${NC} $*"; }
+
+PROJECT_DIR="$HOME/asn123"
+REPO_URL="https://github.com/snll66/asn123.git"
+
+# ── 卸载 ──
+do_uninstall() {
+    echo ""
+    for d in "$PROJECT_DIR" "$HOME/cf-ip-scanner.tmp"; do
+        if [ -d "$d" ]; then
+            rm -rf "$d"
+            info "已删除 $d"
+        fi
+    done
+    echo ""
+    echo -e "${GREEN}✅ 卸载完成${NC}"
+}
+
+# ── 更新 ──
+do_update() {
+    if [ ! -d "$PROJECT_DIR/.git" ]; then
+        warn "项目未安装，请先安装"
+        return 1
+    fi
+    OLD_VER=$(cat "$PROJECT_DIR/VERSION" 2>/dev/null || echo "未知")
+    info "当前版本: $OLD_VER → 检查更新..."
+    cd "$PROJECT_DIR"
+    git pull origin main --ff-only
+    NEW_VER=$(cat "$PROJECT_DIR/VERSION" 2>/dev/null || echo "未知")
+    if [ "$OLD_VER" = "$NEW_VER" ]; then
+        info "已是最新版本 $NEW_VER"
+    else
+        info "${YELLOW}$OLD_VER → $NEW_VER${NC} 已更新"
+        info "重新编译 cf-scanner..."
+        rm -rf "$PROJECT_DIR/cf-scanner"
+        cd "$PROJECT_DIR/cf-scanner-src"
+        ensure_go
+        if grep -q avx2 /proc/cpuinfo 2>/dev/null; then GOAMD=""; else GOAMD="GOAMD64=v2"; fi
+        env $GOAMD go build -o "$PROJECT_DIR/cf-scanner" main.go
+        chmod +x "$PROJECT_DIR/cf-scanner"
+    fi
+    echo ""
+    echo -e "${GREEN}✅ 版本 $NEW_VER${NC}"
+}
+
+# ── Go 安装（install/update 共用）──
+ensure_go() {
+    local GO_VER="1.22.2"
+    local GO_ARCH="linux-amd64"
+    local GO_MIN_MAJOR=1
+    local GO_MIN_MINOR=22
+
+    if command -v go &>/dev/null; then
+        local GO_CUR=$(go version | grep -oP 'go\K[0-9]+\.[0-9]+')
+        local GO_MAJOR=${GO_CUR%%.*}
+        local GO_MINOR=${GO_CUR#*.}
+        if [ "$GO_MAJOR" -gt "$GO_MIN_MAJOR" ] || { [ "$GO_MAJOR" -eq "$GO_MIN_MAJOR" ] && [ "$GO_MINOR" -ge "$GO_MIN_MINOR" ]; }; then
+            info "Go $GO_CUR 已安装"
+            return 0
+        fi
+        warn "Go $GO_CUR 版本过低，需要 ≥${GO_MIN_MAJOR}.${GO_MIN_MINOR}"
+    fi
+
+    warn "安装 Go $GO_VER ..."
+    local GO_DOWNLOADED=false
+    for GO_URL in \
+        "https://golang.google.cn/dl/go${GO_VER}.${GO_ARCH}.tar.gz" \
+        "https://go.dev/dl/go${GO_VER}.${GO_ARCH}.tar.gz"; do
+        if curl -fsSL --connect-timeout 10 "$GO_URL" -o /tmp/go.tar.gz 2>/dev/null; then
+            GO_DOWNLOADED=true
+            break
+        fi
+        warn "  下载失败: $GO_URL"
+    done
+    if ! $GO_DOWNLOADED; then
+        warn "Go 下载失败，请手动安装 Go ≥${GO_MIN_MAJOR}.${GO_MIN_MINOR} 后重试"
+        exit 1
+    fi
+    $SUDO rm -rf /usr/local/go
+    $SUDO tar -C /usr/local -xzf /tmp/go.tar.gz
+    rm -f /tmp/go.tar.gz
+    export PATH="/usr/local/go/bin:$PATH"
+    for RC in "$HOME/.profile" "$HOME/.bashrc"; do
+        if ! grep -q '/usr/local/go/bin' "$RC" 2>/dev/null; then
+            echo 'export PATH="/usr/local/go/bin:$PATH"' >> "$RC"
+        fi
+    done
+    info "Go $GO_VER 安装完成"
+}
+
+# ── 安装 ──
+do_install() {
+    logo
+
+    if [ "$(uname -s)" != "Linux" ]; then
+        warn "当前仅支持 Linux"
+        exit 1
+    fi
+    [ "$(id -u)" = "0" ] && SUDO="" || SUDO="sudo"
+
+    for d in "$HOME/cf-ip-scanner.tmp" "$PROJECT_DIR.tmp"; do
+        if [ -d "$d" ]; then
+            warn "清理旧缓存: $d"
+            rm -rf "$d"
+        fi
+    done
+
+    info "检查系统依赖..."
+    install_pkg() {
+        local pkg=$1
+        if command -v "$pkg" &>/dev/null || dpkg -l "$pkg" &>/dev/null 2>&1 || rpm -q "$pkg" &>/dev/null 2>&1; then
+            return 0
+        fi
+        warn "安装 $pkg ..."
+        if command -v apt &>/dev/null; then
+            $SUDO apt update -qq && $SUDO apt install -y -qq "$pkg"
+        elif command -v yum &>/dev/null; then
+            $SUDO yum install -y -q "$pkg"
+        elif command -v dnf &>/dev/null; then
+            $SUDO dnf install -y -q "$pkg"
+        else
+            warn "未检测到包管理器，请手动安装: $pkg"
+        fi
+    }
+    install_pkg masscan
+    install_pkg libpcap-dev
+    install_pkg prips
+    install_pkg dnsutils
+    install_pkg python3
+    install_pkg git
+
+    ensure_go
+
+    if [ -d "$PROJECT_DIR/.git" ]; then
+        if [ -f "$PROJECT_DIR/VERSION" ] && [ -f "$PROJECT_DIR/run.py" ]; then
+            info "项目已存在 ($(cat "$PROJECT_DIR/VERSION"))，更新中..."
+            cd "$PROJECT_DIR"
+            git pull origin main --ff-only
+        else
+            warn "检测到旧版/损坏安装，重新安装..."
+            rm -rf "$PROJECT_DIR"
+            git clone --depth 1 --branch main "$REPO_URL" "$PROJECT_DIR"
+        fi
+    elif [ -d "$PROJECT_DIR" ]; then
+        warn "检测到旧版残留，清理..."
+        rm -rf "$PROJECT_DIR"
+        info "克隆项目..."
+        git clone --depth 1 --branch main "$REPO_URL" "$PROJECT_DIR"
+    else
+        info "克隆项目..."
+        git clone --depth 1 --branch main "$REPO_URL" "$PROJECT_DIR"
+    fi
+
+    info "编译 cf-scanner..."
+    rm -rf "$PROJECT_DIR/cf-scanner"
+    cd "$PROJECT_DIR/cf-scanner-src"
+    if grep -q avx2 /proc/cpuinfo 2>/dev/null; then GOAMD=""; else GOAMD="GOAMD64=v2"; fi
+    env $GOAMD go build -o "$PROJECT_DIR/cf-scanner" main.go
+    chmod +x "$PROJECT_DIR/cf-scanner"
+    info "cf-scanner 编译完成"
+
+    WRAPPER="/usr/local/bin/asn123"
+    info "注册快捷命令 asn123 → $WRAPPER"
+    cat > "/tmp/asn123_wrapper" << 'WRAPEOF'
+#!/usr/bin/env bash
+PROJECT_DIR="$HOME/asn123"
+case "${1:-}" in
+    update)    exec bash "$PROJECT_DIR/install.sh" update ;;
+    uninstall) exec bash "$PROJECT_DIR/install.sh" uninstall ;;
+    "")        exec python3 "$PROJECT_DIR/run.py" ;;
+    *)         exec python3 "$PROJECT_DIR/run.py" "$@" ;;
+esac
+WRAPEOF
+    $SUDO mv "/tmp/asn123_wrapper" "$WRAPPER"
+    $SUDO chmod +x "$WRAPPER"
+    info "快捷命令已就绪: asn123                   (输入 ASN 扫描)"
+    info "                  asn123 update            (更新)"
+    info "                  asn123 uninstall         (卸载)"
+
+    echo ""
+    echo -e "${GREEN}${BOLD}✅ 安装完成，开始运行${NC}"
+    echo ""
+    exec python3 "$PROJECT_DIR/run.py"
+}
+
+show_menu() {
+    logo
+    echo "  请选择:"
+    echo "    ${CYAN}1${NC}) 安装 / 更新"
+    echo "    ${CYAN}2${NC}) 仅更新"
+    echo "    ${CYAN}3${NC}) 卸载"
+    echo ""
+    read -p "  输入 [1-3]: " choice
+    case "$choice" in
+        1) do_install ;;
+        2) do_update || exit 1 ;;
+        3) do_uninstall ;;
+        *) warn "无效选择" ; exit 1 ;;
+    esac
+}
+
+ACTION="${1:-}"
+
+if [ -n "$ACTION" ]; then
+    case "$ACTION" in
+        install)   do_install ;;
+        update)    do_update || exit 1 ;;
+        uninstall) do_uninstall ;;
+        *)         warn "未知操作: $ACTION (支持: install / update / uninstall)" ; exit 1 ;;
+    esac
+elif [ -t 0 ]; then
+    show_menu
+else
+    do_install
+fi
